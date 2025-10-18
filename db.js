@@ -1,6 +1,5 @@
 const mongoose = require("mongoose");
-const mongoURL =
-  "mongodb+srv://adeelimran467:admin1122@cluster0.8s48f.mongodb.net/";
+const mongoURL = process.env.MONGO_URI;
 mongoose.connect(mongoURL);
 const db = mongoose.connection;
 db.on("connected", () => {

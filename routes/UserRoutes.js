@@ -4,7 +4,7 @@ const bcrypt = require("bcrypt");
 const User = require("../models/userModel");
 const { sendVerificationCode, welcomeCode } = require("../middleware/email");
 const { jwtAuthMiddleware, generateToken } = require("../middleware/jwt");
-const SibApiV3Sdk = require("sib-api-v3-sdk"); // ✅ Brevo SDK
+const SibApiV3Sdk = require("sib-api-v3-sdk");
 require("dotenv").config();
 
 const router = express.Router();
@@ -13,8 +13,34 @@ const saltRounds = 10;
 // ====================== BREVO CONFIG ======================
 const brevoClient = SibApiV3Sdk.ApiClient.instance;
 const apiKey = brevoClient.authentications["api-key"];
-apiKey.apiKey = process.env.BREVO_API_KEY; // Keep key in .env file
+apiKey.apiKey = process.env.BREVO_API_KEY;
 const contactsApi = new SibApiV3Sdk.ContactsApi();
+
+// ====================== HELPER: ADD/UPDATE CONTACT IN BREVO ======================
+const syncContactToBrevo = async (email, name, phone = "", address = "") => {
+  try {
+    const createContact = new SibApiV3Sdk.CreateContact();
+    createContact.email = email;
+    createContact.attributes = {
+      FIRSTNAME: name,
+      PHONE: phone,
+      ADDRESS: address,
+      SMS_SUBSCRIPTION: 0, // Optional: set SMS subscription status
+    };
+    createContact.listIds = [2]; // Replace with your Brevo list ID
+    createContact.updateEnabled = true;
+
+    await contactsApi.createContact(createContact);
+    console.log(`✅ Brevo: Contact synced for ${email}`);
+    return true;
+  } catch (brevoErr) {
+    console.error(
+      "❌ Brevo Sync Error:",
+      brevoErr?.response?.text || brevoErr.message
+    );
+    return false;
+  }
+};
 
 // ====================== SIGNUP ======================
 router.post("/signup", async (req, res) => {
@@ -22,45 +48,47 @@ router.post("/signup", async (req, res) => {
     const { name, email, password } = req.body;
 
     if (!name || !email || !password) {
-      return res.status(400).json({ error: "All fields are required" });
+      return res
+        .status(400)
+        .json({ error: "Name, email, and password are required" });
     }
 
+    // Check if email already exists
     const existEmail = await User.findOne({ email });
     if (existEmail) {
       return res.status(400).json({ error: "Email already exists" });
     }
 
+    // Generate verification code
     const verificationCode = Math.floor(
       100000 + Math.random() * 900000
     ).toString();
 
-    const user = new User({ name, email, password, verificationCode });
+    // Save to MongoDB (password will be hashed by pre-save middleware)
+    const user = new User({
+      name,
+      email,
+      password,
+      verificationCode,
+    });
     await user.save();
 
     // Send verification email
     await sendVerificationCode(email, verificationCode);
 
-    // ✅ Add new contact to Brevo
-    try {
-      const createContact = new SibApiV3Sdk.CreateContact();
-      createContact.email = email;
-      createContact.attributes = { FIRSTNAME: name };
-      createContact.listIds = [2]; // ← Replace with your Brevo list ID
-      createContact.updateEnabled = true;
-      await contactsApi.createContact(createContact);
-      console.log(`Brevo: Added contact for ${email}`);
-    } catch (brevoErr) {
-      console.error(
-        "Brevo Contact Error:",
-        brevoErr?.response?.text || brevoErr
-      );
-    }
+    // Sync to Brevo (sirf name aur email)
+    await syncContactToBrevo(email, name);
 
     res.status(200).json({
       message: "Signup successful. Check your email for verification code",
+      user: {
+        id: user._id,
+        email: user.email,
+        name: user.name,
+      },
     });
   } catch (err) {
-    console.error("Signup Error:", err);
+    console.error("❌ Signup Error:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });
@@ -74,8 +102,9 @@ router.post("/login", async (req, res) => {
     }
 
     const user = await User.findOne({ email });
-    if (!user)
+    if (!user) {
       return res.status(400).json({ error: "Invalid email or password" });
+    }
 
     if (!user.isVerified) {
       return res.status(400).json({ error: "Please verify your email first" });
@@ -91,10 +120,10 @@ router.post("/login", async (req, res) => {
     res.status(200).json({
       message: "Login successful",
       token,
-      user: { id: user._id, email: user.email },
+      user: { id: user._id, email: user.email, name: user.name },
     });
   } catch (err) {
-    console.error("Login Error:", err);
+    console.error("❌ Login Error:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });
@@ -103,22 +132,28 @@ router.post("/login", async (req, res) => {
 router.post("/verify-email", async (req, res) => {
   try {
     const { code } = req.body;
-    if (!code)
+    if (!code) {
       return res.status(400).json({ error: "Verification code is required" });
+    }
 
     const user = await User.findOne({ verificationCode: code.toString() });
-    if (!user)
+    if (!user) {
       return res.status(400).json({ error: "Invalid verification code" });
+    }
 
     user.isVerified = true;
     user.verificationCode = undefined;
     await user.save();
 
+    // Update Brevo contact status
+    await syncContactToBrevo(user.email, user.name);
+
+    // Send welcome email
     await welcomeCode(user.email, user.name);
 
     res.status(200).json({ message: "Email verified successfully" });
   } catch (err) {
-    console.error("Verification Error:", err);
+    console.error("❌ Verification Error:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });
@@ -127,10 +162,14 @@ router.post("/verify-email", async (req, res) => {
 router.post("/forgot-password", async (req, res) => {
   try {
     const { email } = req.body;
-    if (!email) return res.status(400).json({ error: "Email is required" });
+    if (!email) {
+      return res.status(400).json({ error: "Email is required" });
+    }
 
     const user = await User.findOne({ email });
-    if (!user) return res.status(400).json({ error: "User not found" });
+    if (!user) {
+      return res.status(400).json({ error: "User not found" });
+    }
 
     const otp = Math.floor(100000 + Math.random() * 900000).toString();
     const otpExpiry = new Date(Date.now() + 10 * 60 * 1000);
@@ -143,7 +182,7 @@ router.post("/forgot-password", async (req, res) => {
 
     res.status(200).json({ message: "OTP sent to your email" });
   } catch (err) {
-    console.error("Forgot Password Error:", err);
+    console.error("❌ Forgot Password Error:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });
@@ -152,53 +191,106 @@ router.post("/forgot-password", async (req, res) => {
 router.put("/reset-password", async (req, res) => {
   try {
     const { email, otp, newPassword } = req.body;
+
+    // 1️⃣ Validation
     if (!email || !otp || !newPassword) {
-      return res.status(400).json({
-        error: "Email, OTP, and new password are required",
-      });
+      return res
+        .status(400)
+        .json({ error: "Email, OTP, and new password are required" });
     }
 
+    // 2️⃣ User find karein
     const user = await User.findOne({ email });
     if (!user) return res.status(400).json({ error: "User not found" });
 
-    if (!user.resetPasswordOTP || !user.resetPasswordExpires) {
+    // 3️⃣ OTP aur expiry check karein
+    if (!user.resetPasswordOTP || !user.resetPasswordExpires)
       return res.status(400).json({ error: "OTP was not requested" });
-    }
 
-    if (user.resetPasswordOTP !== otp.toString()) {
+    if (user.resetPasswordOTP !== otp.toString())
       return res.status(400).json({ error: "Invalid OTP" });
-    }
 
-    if (user.resetPasswordExpires < new Date()) {
+    if (user.resetPasswordExpires < Date.now())
       return res.status(400).json({ error: "OTP has expired" });
-    }
 
-    user.password = await bcrypt.hash(newPassword, saltRounds);
+    // 4️⃣ Password hash karna
+    const salt = await bcrypt.genSalt(10);
+    const hashedPassword = await bcrypt.hash(newPassword, salt);
+
+    // 5️⃣ Password update
+    user.password = newPassword;
     user.resetPasswordOTP = undefined;
     user.resetPasswordExpires = undefined;
     await user.save({ validateBeforeSave: false });
 
     res.status(200).json({ message: "Password reset successful" });
   } catch (err) {
-    console.error("Reset Password Error:", err);
+    console.error("❌ Reset Password Error:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });
 
-// ====================== LOGIN DATA ======================
+// ====================== GET LOGIN DATA ======================
 router.get("/login-data", jwtAuthMiddleware, async (req, res) => {
   try {
     const userId = req.user?.id;
     if (!userId) {
       return res.status(400).json({ error: "User ID is missing" });
     }
+
     const user = await User.findById(userId);
     if (!user) {
       return res.status(404).json({ error: "User not found" });
     }
-    res.status(200).json({ email: user.email, name: user.name });
+
+    res.status(200).json({
+      email: user.email,
+      name: user.name,
+      phone: user.phone || "",
+      address: user.address || "",
+      isVerified: user.isVerified,
+    });
   } catch (err) {
-    console.error("Login Data Error:", err);
+    console.error("❌ Login Data Error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// ====================== UPDATE USER PROFILE ======================
+router.put("/update-profile", jwtAuthMiddleware, async (req, res) => {
+  try {
+    const userId = req.user?.id;
+    const { name, phone, address } = req.body;
+
+    if (!userId) {
+      return res.status(400).json({ error: "User ID is missing" });
+    }
+
+    const user = await User.findByIdAndUpdate(
+      userId,
+      { name, phone, address },
+      { new: true, runValidators: true }
+    );
+
+    if (!user) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    // Sync updated data to Brevo
+    await syncContactToBrevo(user.email, user.name, user.phone, user.address);
+
+    res.status(200).json({
+      message: "Profile updated successfully",
+      user: {
+        id: user._id,
+        name: user.name,
+        email: user.email,
+        phone: user.phone,
+        address: user.address,
+      },
+    });
+  } catch (err) {
+    console.error("❌ Update Profile Error:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });
