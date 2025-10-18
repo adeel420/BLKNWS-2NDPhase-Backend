@@ -1,14 +1,11 @@
-// ====================== IMPORTS ======================
 const express = require("express");
 const bcrypt = require("bcrypt");
 const User = require("../models/userModel");
-const { sendVerificationCode, welcomeCode } = require("../middleware/email");
-const { jwtAuthMiddleware, generateToken } = require("../middleware/jwt");
+const { generateToken } = require("../middleware/jwt");
 const SibApiV3Sdk = require("sib-api-v3-sdk");
 require("dotenv").config();
 
 const router = express.Router();
-const saltRounds = 10;
 
 // ====================== BREVO CONFIG ======================
 const brevoClient = SibApiV3Sdk.ApiClient.instance;
@@ -16,29 +13,21 @@ const apiKey = brevoClient.authentications["api-key"];
 apiKey.apiKey = process.env.BREVO_API_KEY;
 const contactsApi = new SibApiV3Sdk.ContactsApi();
 
-// ====================== HELPER: ADD/UPDATE CONTACT IN BREVO ======================
-const syncContactToBrevo = async (email, name, phone = "", address = "") => {
+// ====================== HELPER: SYNC TO BREVO ======================
+const syncContactToBrevo = async (email, name) => {
   try {
     const createContact = new SibApiV3Sdk.CreateContact();
     createContact.email = email;
     createContact.attributes = {
       FIRSTNAME: name,
-      PHONE: phone,
-      ADDRESS: address,
-      SMS_SUBSCRIPTION: 0, // Optional: set SMS subscription status
     };
-    createContact.listIds = [2]; // Replace with your Brevo list ID
+    createContact.listIds = [2]; // Replace with your actual Brevo list ID
     createContact.updateEnabled = true;
 
     await contactsApi.createContact(createContact);
     console.log(`✅ Brevo: Contact synced for ${email}`);
-    return true;
-  } catch (brevoErr) {
-    console.error(
-      "❌ Brevo Sync Error:",
-      brevoErr?.response?.text || brevoErr.message
-    );
-    return false;
+  } catch (err) {
+    console.error("❌ Brevo Sync Error:", err.response?.text || err.message);
   }
 };
 
@@ -47,45 +36,24 @@ router.post("/signup", async (req, res) => {
   try {
     const { name, email, password } = req.body;
 
-    if (!name || !email || !password) {
+    if (!name || !email || !password)
       return res
         .status(400)
         .json({ error: "Name, email, and password are required" });
-    }
 
-    // Check if email already exists
     const existEmail = await User.findOne({ email });
-    if (existEmail) {
+    if (existEmail)
       return res.status(400).json({ error: "Email already exists" });
-    }
 
-    // Generate verification code
-    const verificationCode = Math.floor(
-      100000 + Math.random() * 900000
-    ).toString();
-
-    // Save to MongoDB (password will be hashed by pre-save middleware)
-    const user = new User({
-      name,
-      email,
-      password,
-      verificationCode,
-    });
+    const user = new User({ name, email, password });
     await user.save();
 
-    // Send verification email
-    await sendVerificationCode(email, verificationCode);
-
-    // Sync to Brevo (sirf name aur email)
+    // Sync to Brevo
     await syncContactToBrevo(email, name);
 
     res.status(200).json({
-      message: "Signup successful. Check your email for verification code",
-      user: {
-        id: user._id,
-        email: user.email,
-        name: user.name,
-      },
+      message: "Signup successful",
+      user: { id: user._id, email: user.email, name: user.name },
     });
   } catch (err) {
     console.error("❌ Signup Error:", err);
@@ -97,26 +65,18 @@ router.post("/signup", async (req, res) => {
 router.post("/login", async (req, res) => {
   try {
     const { email, password } = req.body;
-    if (!email || !password) {
+    if (!email || !password)
       return res.status(400).json({ error: "Email and password are required" });
-    }
 
     const user = await User.findOne({ email });
-    if (!user) {
+    if (!user)
       return res.status(400).json({ error: "Invalid email or password" });
-    }
-
-    if (!user.isVerified) {
-      return res.status(400).json({ error: "Please verify your email first" });
-    }
 
     const isMatch = await bcrypt.compare(password, user.password);
-    if (!isMatch) {
+    if (!isMatch)
       return res.status(400).json({ error: "Invalid email or password" });
-    }
 
     const token = generateToken({ id: user._id });
-
     res.status(200).json({
       message: "Login successful",
       token,
@@ -124,108 +84,6 @@ router.post("/login", async (req, res) => {
     });
   } catch (err) {
     console.error("❌ Login Error:", err);
-    res.status(500).json({ error: "Internal server error" });
-  }
-});
-
-// ====================== EMAIL VERIFICATION ======================
-router.post("/verify-email", async (req, res) => {
-  try {
-    const { code } = req.body;
-    if (!code) {
-      return res.status(400).json({ error: "Verification code is required" });
-    }
-
-    const user = await User.findOne({ verificationCode: code.toString() });
-    if (!user) {
-      return res.status(400).json({ error: "Invalid verification code" });
-    }
-
-    user.isVerified = true;
-    user.verificationCode = undefined;
-    await user.save();
-
-    // Update Brevo contact status
-    await syncContactToBrevo(user.email, user.name);
-
-    // Send welcome email
-    await welcomeCode(user.email, user.name);
-
-    res.status(200).json({ message: "Email verified successfully" });
-  } catch (err) {
-    console.error("❌ Verification Error:", err);
-    res.status(500).json({ error: "Internal server error" });
-  }
-});
-
-// ====================== FORGOT PASSWORD ======================
-router.post("/forgot-password", async (req, res) => {
-  try {
-    const { email } = req.body;
-    if (!email) {
-      return res.status(400).json({ error: "Email is required" });
-    }
-
-    const user = await User.findOne({ email });
-    if (!user) {
-      return res.status(400).json({ error: "User not found" });
-    }
-
-    const otp = Math.floor(100000 + Math.random() * 900000).toString();
-    const otpExpiry = new Date(Date.now() + 10 * 60 * 1000);
-
-    user.resetPasswordOTP = otp;
-    user.resetPasswordExpires = otpExpiry;
-    await user.save({ validateBeforeSave: false });
-
-    await sendVerificationCode(email, otp);
-
-    res.status(200).json({ message: "OTP sent to your email" });
-  } catch (err) {
-    console.error("❌ Forgot Password Error:", err);
-    res.status(500).json({ error: "Internal server error" });
-  }
-});
-
-// ====================== RESET PASSWORD ======================
-router.put("/reset-password", async (req, res) => {
-  try {
-    const { email, otp, newPassword } = req.body;
-
-    // 1️⃣ Validation
-    if (!email || !otp || !newPassword) {
-      return res
-        .status(400)
-        .json({ error: "Email, OTP, and new password are required" });
-    }
-
-    // 2️⃣ User find karein
-    const user = await User.findOne({ email });
-    if (!user) return res.status(400).json({ error: "User not found" });
-
-    // 3️⃣ OTP aur expiry check karein
-    if (!user.resetPasswordOTP || !user.resetPasswordExpires)
-      return res.status(400).json({ error: "OTP was not requested" });
-
-    if (user.resetPasswordOTP !== otp.toString())
-      return res.status(400).json({ error: "Invalid OTP" });
-
-    if (user.resetPasswordExpires < Date.now())
-      return res.status(400).json({ error: "OTP has expired" });
-
-    // 4️⃣ Password hash karna
-    const salt = await bcrypt.genSalt(10);
-    const hashedPassword = await bcrypt.hash(newPassword, salt);
-
-    // 5️⃣ Password update
-    user.password = newPassword;
-    user.resetPasswordOTP = undefined;
-    user.resetPasswordExpires = undefined;
-    await user.save({ validateBeforeSave: false });
-
-    res.status(200).json({ message: "Password reset successful" });
-  } catch (err) {
-    console.error("❌ Reset Password Error:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });

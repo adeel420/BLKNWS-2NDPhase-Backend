@@ -1,30 +1,15 @@
-const nodemailer = require("nodemailer");
+// const nodemailer = require("nodemailer");
 
 // const transporter = nodemailer.createTransport({
 //   host: "smtp.gmail.com",
 //   port: 587,
 //   secure: false,
 //   auth: {
-//     user: "adeelimran467@gmail.com",
-//     pass: "bvfdvstuchpjgcqi",
+//     user: process.env.GMAIL_USER,
+//     pass: process.env.GMAIL_APP_PASSWORD,
 //   },
-//   debug: true,
+//   tls: { rejectUnauthorized: false },
+//   connectionTimeout: 10000,
 // });
 
 // module.exports = transporter;
-
-// const nodemailer = require("nodemailer");
-
-const transporter = nodemailer.createTransport({
-  host: "smtp.gmail.com",
-  port: 587,
-  secure: false,
-  auth: {
-    user: process.env.GMAIL_USER,
-    pass: process.env.GMAIL_APP_PASSWORD,
-  },
-  tls: { rejectUnauthorized: false },
-  connectionTimeout: 10000,
-});
-
-module.exports = transporter;
