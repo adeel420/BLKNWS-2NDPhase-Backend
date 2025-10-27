@@ -1,6 +1,6 @@
 const express = require("express");
 const User = require("../models/userModel");
-const { generateToken } = require("../middleware/jwt");
+const { generateToken, jwtAuthMiddleware } = require("../middleware/jwt");
 const SibApiV3Sdk = require("sib-api-v3-sdk");
 require("dotenv").config();
 
@@ -97,6 +97,23 @@ router.post("/login", async (req, res) => {
     });
   } catch (err) {
     console.error("❌ Login Error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+router.get("/login-data", jwtAuthMiddleware, async (req, res) => {
+  try {
+    const userId = req.user?.id;
+    if (!userId) {
+      return res.status(400).json({ error: "User ID is missing" });
+    }
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({ error: "User not found" });
+    }
+    res.status(200).json({ email: user.email, name: user.name });
+  } catch (err) {
+    console.error("Login Data Error:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });
